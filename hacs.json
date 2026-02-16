@@ -1,0 +1,10 @@
+{
+  "name": "Kawasaki Rideology BLE",
+  "content_in_root": false,
+  "render_readme": true,
+  "zip_release": true,
+  "filename": "kawasaki.zip",
+  "domains": [
+    "kawasaki"
+  ]
+}

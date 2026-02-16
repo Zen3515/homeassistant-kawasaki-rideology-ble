@@ -1,0 +1,20 @@
+{
+  "domain": "kawasaki",
+  "name": "Kawasaki Rideology BLE",
+  "version": "2026.2.1",
+  "codeowners": [
+    "@Zen3515"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "bluetooth"
+  ],
+  "documentation": "https://github.com/Zen3515/homeassistant-kawasaki-rideology-ble",
+  "iot_class": "local_push",
+  "requirements": [],
+  "bluetooth": [
+    {
+      "local_name": "Kawasaki-*"
+    }
+  ]
+}
