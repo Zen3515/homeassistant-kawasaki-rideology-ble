@@ -82,7 +82,7 @@ This includes the following changes:
    ```
 2. Edit the target Bluetooth MAC address and enter your passkey in `esphome/components/bluetooth_proxy/bluetooth_connection.cpp` and `esphome/components/bluetooth_proxy/bluetooth_proxy.cpp`.
 3. In your ESPHome config directory, create `external_components/z500_patches`.
-4. Copy `esphome/components/bluetooth_proxy` from the cloned repo into `external_components/z500_patches`.
+4. Copy `esphome/components/bluetooth_proxy` `esphome/components/esp32_ble` `esphome/components/esp32_ble_tracker` `esphome/components/esp32_ble_client` from the cloned repo into `external_components/z500_patches`.
 5. Add this to your ESPHome node YAML:
 
 ```yaml
