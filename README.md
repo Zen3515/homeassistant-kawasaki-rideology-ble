@@ -10,9 +10,8 @@ A Home Assistant custom integration that connects to Kawasaki motorcycles over R
 
 ## Demo
 
-[Watch demo (mp4)](img/z500-demo.mp4)
-![video preview](img/z500-demo-img.png)
-<video src="img/z500-demo.mp4" alt="Kawasaki Rideology BLE" width="100%"></video>
+[![video preview](img/z500-demo-img.png)](https://youtube.com/shorts/_mNGgsVcCUY?feature=share)
+Watch demo [Youtube](https://youtube.com/shorts/_mNGgsVcCUY?feature=share) [(mp4)](https://github.com/Zen3515/homeassistant-kawasaki-rideology-ble/raw/refs/heads/main/img/z500-demo.mp4)
 
 ## Installation
 
