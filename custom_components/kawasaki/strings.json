@@ -18,9 +18,17 @@
       },
       "model": {
         "data": {
-          "model": "Model"
+          "model": "Model",
+          "preferred_proxy_source": "Preferred proxy"
         },
-        "description": "Select your motorcycle model."
+        "description": "Select your motorcycle model and optionally lock the integration to one Bluetooth proxy. Automatic allows any available proxy."
+      },
+      "reconfigure": {
+        "data": {
+          "model": "Model",
+          "preferred_proxy_source": "Preferred proxy"
+        },
+        "description": "Change the motorcycle model or pick a specific Bluetooth proxy source. Automatic allows any available proxy."
       }
     }
   }

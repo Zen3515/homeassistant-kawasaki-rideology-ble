@@ -9,7 +9,7 @@ from homeassistant.const import CONF_ADDRESS, Platform
 from homeassistant.core import HomeAssistant
 
 from .config import async_load_model_config
-from .const import CONF_MODEL
+from .const import CONF_MODEL, CONF_PREFERRED_PROXY_SOURCE
 from .coordinator import KawasakiCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -23,11 +23,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: KawasakiConfigEntry) -> 
     """Set up Kawasaki from a config entry."""
     address = entry.unique_id or entry.data.get(CONF_ADDRESS)
     model = entry.data.get(CONF_MODEL)
+    preferred_proxy_source = entry.data.get(CONF_PREFERRED_PROXY_SOURCE)
     _LOGGER.debug(
-        "Setting up config entry %s for address %s and model %s",
+        "Setting up config entry %s for address %s, model %s, preferred_proxy_source=%s",
         entry.entry_id,
         address,
         model,
+        preferred_proxy_source,
     )
     if not address or not model:
         _LOGGER.error(
@@ -39,7 +41,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: KawasakiConfigEntry) -> 
         return False
 
     config = await async_load_model_config(hass, model)
-    coordinator = KawasakiCoordinator(hass, address=address, model=model, config=config)
+    coordinator = KawasakiCoordinator(
+        hass,
+        address=address,
+        model=model,
+        config=config,
+        preferred_proxy_source=preferred_proxy_source,
+    )
     await coordinator.async_start()
     entry.runtime_data = coordinator
 

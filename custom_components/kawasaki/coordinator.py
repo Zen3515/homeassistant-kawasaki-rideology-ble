@@ -11,7 +11,10 @@ from typing import Any
 from bleak import BleakError
 from bleak_retry_connector import close_stale_connections_by_address
 
-from homeassistant.components.bluetooth import async_ble_device_from_address
+from homeassistant.components.bluetooth import (
+    async_ble_device_from_address,
+    async_scanner_devices_by_address,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
@@ -42,13 +45,20 @@ class KawasakiCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Maintain a long-lived BLE connection and stream frames."""
 
     def __init__(
-        self, hass: HomeAssistant, *, address: str, model: str, config: dict
+        self,
+        hass: HomeAssistant,
+        *,
+        address: str,
+        model: str,
+        config: dict,
+        preferred_proxy_source: str | None = None,
     ) -> None:
         """Initialize the coordinator."""
         super().__init__(hass, _LOGGER, name=DOMAIN)
         self.address = address
         self.model = model
         self.config = config
+        self.preferred_proxy_source = preferred_proxy_source
         self.data: dict[str, Any] = {}
         self._task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
@@ -69,6 +79,7 @@ class KawasakiCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._mc_info_probe_interval_s = max(
             1.0, float(self.config.get("mc_info_probe_interval_s", 20.0))
         )
+        self._preferred_proxy_unavailable_logged = False
 
     @property
     def available(self) -> bool:
@@ -102,6 +113,47 @@ class KawasakiCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         else:
             _LOGGER.info("Device is unavailable: %s", self.address)
         self._unavailable_logged = True
+
+    def _async_resolve_ble_device(self) -> tuple[Any | None, str | None]:
+        """Resolve the BLE device, honoring a configured proxy source."""
+        if not self.preferred_proxy_source:
+            ble_device = async_ble_device_from_address(
+                self.hass, self.address, connectable=True
+            )
+            return ble_device, None if ble_device else "no connectable device found"
+
+        scanner_devices = async_scanner_devices_by_address(
+            self.hass, self.address, connectable=True
+        )
+        for scanner_device in scanner_devices:
+            scanner = scanner_device.scanner
+            if scanner.source != self.preferred_proxy_source:
+                continue
+            self._preferred_proxy_unavailable_logged = False
+            ble_device = scanner_device.ble_device
+            if ble_device is not None:
+                _LOGGER.debug(
+                    "Using preferred proxy source %s (%s) for %s",
+                    scanner.source,
+                    getattr(scanner, "name", scanner.source),
+                    self.address,
+                )
+                return ble_device, None
+            return None, f"preferred proxy {self.preferred_proxy_source} has no connectable device"
+
+        if not self._preferred_proxy_unavailable_logged:
+            available_sources = ", ".join(
+                f"{getattr(scanner_device.scanner, 'name', scanner_device.scanner.source)} [{scanner_device.scanner.source}]"
+                for scanner_device in scanner_devices
+            ) or "none"
+            _LOGGER.debug(
+                "Preferred proxy source %s is not currently available for %s; available sources=%s",
+                self.preferred_proxy_source,
+                self.address,
+                available_sources,
+            )
+            self._preferred_proxy_unavailable_logged = True
+        return None, f"preferred proxy {self.preferred_proxy_source} not available"
 
     async def async_start(self) -> None:
         """Start the background BLE task."""
@@ -322,14 +374,16 @@ class KawasakiCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._connection_attempt,
                 self.address,
             )
-            ble_device = async_ble_device_from_address(
-                self.hass, self.address, connectable=True
-            )
+            ble_device, unavailable_reason = self._async_resolve_ble_device()
             if not ble_device:
-                self._set_available(False, reason="no connectable device found")
+                self._set_available(
+                    False,
+                    reason=unavailable_reason or "no connectable device found",
+                )
                 _LOGGER.debug(
-                    "No connectable device found for %s, retrying in %s seconds",
+                    "No eligible connectable device found for %s (reason=%s), retrying in %s seconds",
                     self.address,
+                    unavailable_reason or "no connectable device found",
                     RECONNECT_DELAY,
                 )
                 self.hass.loop.call_soon_threadsafe(

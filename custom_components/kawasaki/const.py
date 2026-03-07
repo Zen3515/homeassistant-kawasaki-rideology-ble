@@ -4,6 +4,7 @@ from __future__ import annotations
 
 DOMAIN = "kawasaki"
 CONF_MODEL = "model"
+CONF_PREFERRED_PROXY_SOURCE = "preferred_proxy_source"
 
 MODEL_Z500 = "z500"
 MODEL_NAMES = {

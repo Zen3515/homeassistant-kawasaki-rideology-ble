@@ -1,27 +1,35 @@
 {
-    "config": {
-        "abort": {
-            "already_configured": "Device is already configured",
-            "no_devices_found": "No devices found on the network",
-            "not_supported": "Device is not supported"
+  "config": {
+    "abort": {
+      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]",
+      "no_devices_found": "[%key:common::config_flow::abort::no_devices_found%]",
+      "not_supported": "Device is not supported"
+    },
+    "flow_title": "{name}",
+    "step": {
+      "bluetooth_confirm": {
+        "description": "[%key:component::bluetooth::config::step::bluetooth_confirm::description%]"
+      },
+      "user": {
+        "data": {
+          "address": "[%key:common::config_flow::data::device%]"
         },
-        "flow_title": "{name}",
-        "step": {
-            "bluetooth_confirm": {
-                "description": "Do you want to set up {name}?"
-            },
-            "model": {
-                "data": {
-                    "model": "Model"
-                },
-                "description": "Select your motorcycle model."
-            },
-            "user": {
-                "data": {
-                    "address": "Device"
-                },
-                "description": "Choose a device to set up"
-            }
-        }
+        "description": "[%key:component::bluetooth::config::step::user::description%]"
+      },
+      "model": {
+        "data": {
+          "model": "Model",
+          "preferred_proxy_source": "Preferred proxy"
+        },
+        "description": "Select your motorcycle model and optionally lock the integration to one Bluetooth proxy. Automatic allows any available proxy."
+      },
+      "reconfigure": {
+        "data": {
+          "model": "Model",
+          "preferred_proxy_source": "Preferred proxy"
+        },
+        "description": "Change the motorcycle model or pick a specific Bluetooth proxy source. Automatic allows any available proxy."
+      }
     }
+  }
 }
