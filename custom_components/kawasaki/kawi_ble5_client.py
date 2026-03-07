@@ -387,6 +387,9 @@ class KawiBle5Client:
                 _LOGGER.debug("Reconnecting after pair for %s", self.address)
                 await self._client.connect()
 
+        await self._async_refresh_services_cache(
+            reason="pair completion" if should_pair else "startup connection"
+        )
         self._resolve_gatt_targets()
         for target in self._notify_targets:
             target_id = (
@@ -410,6 +413,28 @@ class KawiBle5Client:
                 await self._client.start_notify(target, self._handle_notify)
         self._pending_frames.clear()
         _LOGGER.debug("Notifications enabled for %s", self.address or self.ble_device)
+
+    async def _async_refresh_services_cache(self, reason: str) -> None:
+        """Refresh the Bleak-side GATT service cache before resolving targets."""
+        if not self._client or not hasattr(self._client, "get_services"):
+            return
+
+        try:
+            services = await self._client.get_services()
+        except (BleakError, OSError, TimeoutError) as exc:
+            _LOGGER.debug("Failed to refresh GATT services after %s: %s", reason, exc)
+            return
+
+        service_dict = getattr(services, "services", {})
+        service_values = list(service_dict.values()) if service_dict else []
+        if service_values:
+            _LOGGER.debug(
+                "Refreshed GATT services after %s: %s",
+                reason,
+                ", ".join(str(getattr(service, "uuid", "?")) for service in service_values),
+            )
+        else:
+            _LOGGER.debug("Refreshed GATT services after %s but cache is empty", reason)
 
     async def async_stop(self) -> None:
         """Stop notifications and disconnect."""
