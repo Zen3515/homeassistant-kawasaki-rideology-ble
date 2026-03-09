@@ -44,6 +44,8 @@ def load_model_config(model: str) -> dict[str, Any]:
         "startup_wait_poll_s",
         "startup_retries",
         "startup_retry_delay_s",
+        "connect_timeout_s",
+        "connectable_freshness_s",
         "max_pending_frames",
         "log_all_frames",
         "startup_flip_write_mode_on_no_frames",

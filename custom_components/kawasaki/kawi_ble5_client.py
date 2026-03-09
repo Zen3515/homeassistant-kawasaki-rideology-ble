@@ -8,6 +8,7 @@ import contextlib
 from datetime import datetime
 import logging
 import platform
+import time
 
 from bleak import BleakClient, BleakError
 from bleak.backends.characteristic import BleakGATTCharacteristic
@@ -292,10 +293,14 @@ class KawiBle5Client:
         self.force_rebond_on_disconnect = bool(
             self.config.get("force_rebond_on_disconnect", False)
         )
+        self.connect_timeout_s = max(
+            1.0, float(self.config.get("connect_timeout_s", 12.0))
+        )
         self._max_pending_frames = max(
             32, int(self.config.get("max_pending_frames", 512))
         )
         self._client: BleakClient | None = None
+        self._services_cache = None
         self._control_target: BleakGATTCharacteristic | str = CONTROL_UUID
         self._notify_targets: list[BleakGATTCharacteristic | str] = list(NOTIFY_UUIDS)
         self._notify_handle_to_uuid: dict[int, str] = {}
@@ -318,7 +323,8 @@ class KawiBle5Client:
                 "require_startup_responses=%s startup_wait_timeout_s=%.2f "
                 "startup_wait_frames=%s startup_no_wait_frames=%s startup_profiles=%s force_start_notify=%s "
                 "force_rebond_before_startup=%s startup_retries=%s "
-                "startup_retry_delay_s=%.2f force_rebond_on_disconnect=%s"
+                "startup_retry_delay_s=%.2f force_rebond_on_disconnect=%s "
+                "connect_timeout_s=%.2f"
             ),
             self.address or (self.ble_device.address if self.ble_device else "unknown"),
             self.control_write_with_response,
@@ -332,6 +338,7 @@ class KawiBle5Client:
             self.startup_retries,
             self.startup_retry_delay_s,
             self.force_rebond_on_disconnect,
+            self.connect_timeout_s,
         )
 
     @property
@@ -352,24 +359,59 @@ class KawiBle5Client:
             raise RuntimeError("Device not found. Provide address or ble_device.")
 
         if self.ble_device:
+            target_address = self.address or self.ble_device.address
             _LOGGER.debug(
-                "Connecting with retry connector to %s",
-                self.address or self.ble_device.address,
+                "Connecting with retry connector to %s (timeout=%.1fs)",
+                target_address,
+                self.connect_timeout_s,
             )
-            self._client = await establish_connection(
-                BleakClient,
-                self.ble_device,
-                self.address or self.ble_device.address,
-            )
+            try:
+                self._client = await asyncio.wait_for(
+                    establish_connection(
+                        BleakClient,
+                        self.ble_device,
+                        target_address,
+                    ),
+                    timeout=self.connect_timeout_s,
+                )
+            except TimeoutError:
+                _LOGGER.debug(
+                    "Connect attempt to %s timed out after %.1fs",
+                    target_address,
+                    self.connect_timeout_s,
+                )
+                raise
         else:
-            _LOGGER.debug("Connecting directly to %s", self.address)
+            _LOGGER.debug(
+                "Connecting directly to %s (timeout=%.1fs)",
+                self.address,
+                self.connect_timeout_s,
+            )
             self._client = BleakClient(target)
-            await self._client.connect()
+            try:
+                await asyncio.wait_for(
+                    self._client.connect(), timeout=self.connect_timeout_s
+                )
+            except TimeoutError:
+                _LOGGER.debug(
+                    "Direct connect attempt to %s timed out after %.1fs",
+                    self.address,
+                    self.connect_timeout_s,
+                )
+                with contextlib.suppress(Exception):
+                    await self._client.disconnect()
+                self._client = None
+                raise
 
         _LOGGER.debug("Connected to %s", self.address or self.ble_device)
+        self._services_cache = None
         rebond_succeeded = False
         if self.force_rebond_before_startup:
             rebond_succeeded = await self.async_force_rebond()
+
+        # Mirror the official Rideology session bootstrap: discover services first,
+        # then negotiate MTU, then pair inside the live GATT session if needed.
+        await self._async_refresh_services_cache(reason="startup connection pre-pair")
 
         if self.mtu and hasattr(self._client, "request_mtu"):
             # Not all platforms support MTU negotiation
@@ -416,25 +458,118 @@ class KawiBle5Client:
 
     async def _async_refresh_services_cache(self, reason: str) -> None:
         """Refresh the Bleak-side GATT service cache before resolving targets."""
-        if not self._client or not hasattr(self._client, "get_services"):
+        if not self._client:
             return
 
-        try:
-            services = await self._client.get_services()
-        except (BleakError, OSError, TimeoutError) as exc:
-            _LOGGER.debug("Failed to refresh GATT services after %s: %s", reason, exc)
-            return
+        if "pair completion" in reason and hasattr(self._client, "clear_cache"):
+            try:
+                cleared = await self._client.clear_cache()
+                self._services_cache = None
+                _LOGGER.debug(
+                    "Cleared backend GATT cache after %s: %s",
+                    reason,
+                    cleared,
+                )
+            except (BleakError, OSError, TimeoutError, AttributeError) as exc:
+                _LOGGER.debug(
+                    "Failed to clear backend GATT cache after %s: %s",
+                    reason,
+                    exc,
+                )
 
-        service_dict = getattr(services, "services", {})
-        service_values = list(service_dict.values()) if service_dict else []
-        if service_values:
-            _LOGGER.debug(
-                "Refreshed GATT services after %s: %s",
-                reason,
-                ", ".join(str(getattr(service, "uuid", "?")) for service in service_values),
-            )
-        else:
-            _LOGGER.debug("Refreshed GATT services after %s but cache is empty", reason)
+        refresh_deadline = time.monotonic() + 2.0
+        attempt = 0
+        while True:
+            attempt += 1
+            services = None
+            origin = "client.services property"
+
+            if hasattr(self._client, "_get_services"):
+                try:
+                    services = await self._client._get_services(  # type: ignore[attr-defined]
+                        dangerous_use_bleak_cache=False
+                    )
+                    origin = "client._get_services()"
+                except TypeError:
+                    try:
+                        services = await self._client._get_services()  # type: ignore[attr-defined]
+                        origin = "client._get_services()"
+                    except (BleakError, OSError, TimeoutError, AttributeError) as exc:
+                        _LOGGER.debug(
+                            "Failed to refresh GATT services after %s on attempt %s via _get_services: %s",
+                            reason,
+                            attempt,
+                            exc,
+                        )
+                except (BleakError, OSError, TimeoutError, AttributeError) as exc:
+                    _LOGGER.debug(
+                        "Failed to refresh GATT services after %s on attempt %s via _get_services: %s",
+                        reason,
+                        attempt,
+                        exc,
+                    )
+
+            if services is None and hasattr(self._client, "get_services"):
+                try:
+                    services = await self._client.get_services()
+                    origin = "client.get_services()"
+                except (BleakError, OSError, TimeoutError, AttributeError) as exc:
+                    _LOGGER.debug(
+                        "Failed to refresh GATT services after %s on attempt %s via get_services: %s",
+                        reason,
+                        attempt,
+                        exc,
+                    )
+
+            if services is None:
+                services = self._services_cache or getattr(self._client, "services", None)
+
+            if not services:
+                self._services_cache = None
+                _LOGGER.debug(
+                    "No GATT services available after %s on attempt %s",
+                    reason,
+                    attempt,
+                )
+                if time.monotonic() >= refresh_deadline:
+                    return
+                await asyncio.sleep(0.2)
+                continue
+
+            self._services_cache = services
+            service_dict = getattr(services, "services", {})
+            service_values = list(service_dict.values()) if service_dict else []
+            service_uuids = [
+                str(getattr(service, "uuid", "?")) for service in service_values
+            ]
+            has_target_service = any(uuid.lower() == SERVICE_UUID for uuid in service_uuids)
+            if service_values:
+                _LOGGER.debug(
+                    "Refreshed GATT services after %s on attempt %s via %s: %s",
+                    reason,
+                    attempt,
+                    origin,
+                    ", ".join(service_uuids),
+                )
+            else:
+                _LOGGER.debug(
+                    "Refreshed GATT services after %s on attempt %s via %s but cache is empty",
+                    reason,
+                    attempt,
+                    origin,
+                )
+
+            if has_target_service or time.monotonic() >= refresh_deadline:
+                if not has_target_service:
+                    _LOGGER.debug(
+                        "Target service %s still missing after %s attempt(s) for %s",
+                        SERVICE_UUID,
+                        attempt,
+                        reason,
+                    )
+                return
+
+            await asyncio.sleep(0.2)
 
     async def async_stop(self) -> None:
         """Stop notifications and disconnect."""
@@ -463,6 +598,7 @@ class KawiBle5Client:
                 "Disconnected BLE client for %s", self.address or self.ble_device
             )
             self._client = None
+            self._services_cache = None
             self._control_target = CONTROL_UUID
             self._notify_targets = list(NOTIFY_UUIDS)
             self._notify_handle_to_uuid.clear()
@@ -502,7 +638,7 @@ class KawiBle5Client:
         if not self._client:
             return
 
-        services = getattr(self._client, "services", None)
+        services = self._services_cache or getattr(self._client, "services", None)
         if not services:
             _LOGGER.debug(
                 "No GATT service cache available; falling back to UUID-only targets"
