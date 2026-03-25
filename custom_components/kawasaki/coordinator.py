@@ -268,6 +268,7 @@ class KawasakiCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ):
                 freshest_candidate = (origin, service_info)
 
+        stale_preferred_reason: str | None = None
         if freshest_candidate is not None:
             origin, service_info = freshest_candidate
             ble_device = service_info.device
@@ -282,29 +283,36 @@ class KawasakiCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     freshness_window_s,
                     origin,
                 )
-                return (
-                    None,
-                    f"preferred proxy {self.preferred_proxy_source} last seen {age_s:.1f}s ago exceeds freshness window {freshness_window_s:.1f}s",
-                )
-
-            self._preferred_proxy_unavailable_logged = False
-            if origin == "latest HA service info":
-                _LOGGER.debug(
-                    "Using preferred proxy source %s (%s) for %s from latest HA service info (connectable=%s)",
-                    service_info.source,
-                    service_info.name,
-                    self.address,
-                    service_info.connectable,
+                stale_preferred_reason = (
+                    f"preferred proxy {self.preferred_proxy_source} last seen {age_s:.1f}s ago "
+                    f"exceeds freshness window {freshness_window_s:.1f}s"
                 )
             else:
-                _LOGGER.debug(
-                    "Using preferred proxy source %s (%s) for %s from live advertisement cache (connectable=%s)",
-                    service_info.source,
-                    service_info.name,
-                    self.address,
-                    service_info.connectable,
-                )
-            return ble_device, None
+                self._preferred_proxy_unavailable_logged = False
+                if origin == "latest HA service info":
+                    _LOGGER.debug(
+                        "Using preferred proxy source %s (%s) for %s from latest HA service info (connectable=%s)",
+                        service_info.source,
+                        service_info.name,
+                        self.address,
+                        service_info.connectable,
+                    )
+                else:
+                    _LOGGER.debug(
+                        "Using preferred proxy source %s (%s) for %s from live advertisement cache (connectable=%s)",
+                        service_info.source,
+                        service_info.name,
+                        self.address,
+                        service_info.connectable,
+                    )
+                return ble_device, None
+
+        if stale_preferred_reason is not None:
+            _LOGGER.debug(
+                "Preferred proxy %s has a stale cached sighting for %s; checking fresh connectable lookup before giving up",
+                self.preferred_proxy_source,
+                self.address,
+            )
 
         scanner_devices = async_scanner_devices_by_address(
             self.hass, self.address, connectable=True
@@ -317,31 +325,28 @@ class KawasakiCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if ble_device is None:
                 return None, f"preferred proxy {self.preferred_proxy_source} has no connectable device"
 
-            is_fresh, age_s, freshness_window_s = self._connectable_is_fresh(
-                source=scanner.source
-            )
-            if not is_fresh:
-                assert age_s is not None
+            self._preferred_proxy_unavailable_logged = False
+            age_s = self._last_seen_age_s(source=scanner.source)
+            if age_s is not None and age_s > freshness_window_s:
                 _LOGGER.debug(
-                    "Skipping connect for %s via preferred proxy %s because the last advertisement is stale: age=%.1fs threshold=%.1fs",
-                    self.address,
+                    "Using preferred proxy source %s (%s) for %s from connectable lookup despite stale cached age=%.1fs threshold=%.1fs",
                     scanner.source,
+                    getattr(scanner, "name", scanner.source),
+                    self.address,
                     age_s,
                     freshness_window_s,
                 )
-                return (
-                    None,
-                    f"preferred proxy {self.preferred_proxy_source} last seen {age_s:.1f}s ago exceeds freshness window {freshness_window_s:.1f}s",
+            else:
+                _LOGGER.debug(
+                    "Using preferred proxy source %s (%s) for %s from connectable lookup",
+                    scanner.source,
+                    getattr(scanner, "name", scanner.source),
+                    self.address,
                 )
-
-            self._preferred_proxy_unavailable_logged = False
-            _LOGGER.debug(
-                "Using preferred proxy source %s (%s) for %s from connectable lookup",
-                scanner.source,
-                getattr(scanner, "name", scanner.source),
-                self.address,
-            )
             return ble_device, None
+
+        if stale_preferred_reason is not None:
+            return None, stale_preferred_reason
 
         if not self._preferred_proxy_unavailable_logged:
             available_sources = ", ".join(

@@ -322,7 +322,7 @@ class KawiBle5Client:
                 "Client policy for %s: control_write_with_response=%s "
                 "require_startup_responses=%s startup_wait_timeout_s=%.2f "
                 "startup_wait_frames=%s startup_no_wait_frames=%s startup_profiles=%s force_start_notify=%s "
-                "force_rebond_before_startup=%s startup_retries=%s "
+                "force_rebond_before_startup=%s pair_before_startup=%s startup_retries=%s "
                 "startup_retry_delay_s=%.2f force_rebond_on_disconnect=%s "
                 "connect_timeout_s=%.2f"
             ),
@@ -335,6 +335,7 @@ class KawiBle5Client:
             len(self.startup_frame_profiles),
             self.force_start_notify,
             self.force_rebond_before_startup,
+            self.pair_before_startup,
             self.startup_retries,
             self.startup_retry_delay_s,
             self.force_rebond_on_disconnect,
@@ -347,6 +348,266 @@ class KawiBle5Client:
         if self._client is None:
             return False
         return bool(self._client.is_connected)
+
+    def _client_label(self) -> str:
+        """Return a stable client label for logs."""
+        return self.address or (self.ble_device.address if self.ble_device else "unknown")
+
+    def _notify_target_id(self, target: BleakGATTCharacteristic | str) -> str:
+        """Return a readable notify target label for logs."""
+        return (
+            str(target.uuid)
+            if isinstance(target, BleakGATTCharacteristic)
+            else str(target)
+        )
+
+    def _services_cache_summary(self) -> str:
+        """Summarize the current GATT cache for startup diagnostics."""
+        services = self._services_cache
+        if not services:
+            return "services=none"
+
+        service_dict = getattr(services, "services", {})
+        service_values = list(service_dict.values()) if service_dict else []
+        if not service_values:
+            return "services=empty"
+
+        target_service = None
+        for service in service_values:
+            if str(getattr(service, "uuid", "")).lower() == SERVICE_UUID:
+                target_service = service
+                break
+
+        target_chars = len(target_service.characteristics) if target_service else 0
+        return (
+            f"services={len(service_values)} "
+            f"target_service={'yes' if target_service else 'no'} "
+            f"target_chars={target_chars}"
+        )
+
+    def _log_startup_stage(
+        self, stage: str, state: str, started: float, **details: object
+    ) -> None:
+        """Emit a compact startup stage log with elapsed time."""
+        elapsed_ms = (time.monotonic() - started) * 1000.0
+        detail_parts = [
+            f"{key}={value}" for key, value in details.items() if value is not None
+        ]
+        suffix = f", {', '.join(detail_parts)}" if detail_parts else ""
+        _LOGGER.debug(
+            "Startup stage %s %s for %s (elapsed=%.0fms%s)",
+            stage,
+            state,
+            self._client_label(),
+            elapsed_ms,
+            suffix,
+        )
+
+    def _is_authorization_error(self, exc: Exception) -> bool:
+        """Best-effort check for auth/bond related backend failures."""
+        message = str(exc).lower()
+        return any(
+            token in message
+            for token in (
+                "insufficient authorization",
+                "insufficient authentication",
+                "not authorized",
+                "not authenticated",
+                "authentication",
+                "authorize",
+                "bond",
+                "security",
+                "encrypt",
+                "encryption",
+            )
+        )
+
+    async def _async_refresh_startup_services(self, reason: str) -> None:
+        """Refresh GATT services with explicit startup-stage logs."""
+        started = time.monotonic()
+        _LOGGER.debug(
+            "Startup stage service_refresh begin for %s: reason=%s",
+            self._client_label(),
+            reason,
+        )
+        await self._async_refresh_services_cache(
+            reason=reason,
+            allow_property_fallback=False,
+        )
+        self._log_startup_stage(
+            "service_refresh",
+            "complete",
+            started,
+            reason=reason,
+            cache=self._services_cache_summary(),
+        )
+
+    async def _async_request_startup_mtu(self) -> None:
+        """Request MTU with explicit startup-stage logs."""
+        if not self.mtu or not self._client or not hasattr(self._client, "request_mtu"):
+            _LOGGER.debug(
+                "Startup stage mtu_request skipped for %s: mtu=%s supported=%s",
+                self._client_label(),
+                self.mtu,
+                bool(self._client and hasattr(self._client, "request_mtu")),
+            )
+            return
+
+        started = time.monotonic()
+        _LOGGER.debug(
+            "Startup stage mtu_request begin for %s: requested_mtu=%s",
+            self._client_label(),
+            self.mtu,
+        )
+        try:
+            await self._client.request_mtu(self.mtu)
+        except Exception as exc:
+            self._log_startup_stage(
+                "mtu_request",
+                "failed",
+                started,
+                requested_mtu=self.mtu,
+                error=repr(exc),
+            )
+        else:
+            self._log_startup_stage(
+                "mtu_request",
+                "complete",
+                started,
+                requested_mtu=self.mtu,
+            )
+
+    async def _async_pair_for_startup(self, reason: str) -> bool:
+        """Perform a startup pair step with stage logs."""
+        started = time.monotonic()
+        _LOGGER.debug(
+            "Startup stage pair begin for %s: reason=%s",
+            self._client_label(),
+            reason,
+        )
+        if not self._client:
+            self._log_startup_stage(
+                "pair",
+                "skipped",
+                started,
+                reason=reason,
+                error="client_unavailable",
+            )
+            return False
+
+        if not self.connected:
+            _LOGGER.debug("Reconnecting before pair for %s", self.address)
+            await self._client.connect()
+
+        pair_invoked = await self.async_pair()
+
+        if not self.connected:
+            _LOGGER.debug("Reconnecting after pair for %s", self.address)
+            await self._client.connect()
+
+        self._log_startup_stage(
+            "pair",
+            "complete",
+            started,
+            reason=reason,
+            pair_invoked=pair_invoked,
+            connected=self.connected,
+        )
+        return pair_invoked
+
+    def _log_target_resolution(self, reason: str) -> None:
+        """Emit a compact summary of resolved control/notify targets."""
+        notify_summary = ", ".join(
+            self._notify_target_id(target) for target in self._notify_targets
+        )
+        _LOGGER.debug(
+            "Startup stage target_resolution complete for %s: reason=%s cache=%s control=%s notify_targets=[%s]",
+            self._client_label(),
+            reason,
+            self._services_cache_summary(),
+            self._notify_target_id(self._control_target),
+            notify_summary,
+        )
+
+    async def _async_start_notifications(
+        self, *, allow_pair_fallback: bool
+    ) -> None:
+        """Enable notifications, optionally pairing on auth-related failure."""
+        if not self._client:
+            raise RuntimeError("BLE client unavailable during startup notifications")
+
+        started_targets: list[BleakGATTCharacteristic | str] = []
+        total_targets = len(self._notify_targets)
+
+        for index, target in enumerate(self._notify_targets, start=1):
+            target_id = self._notify_target_id(target)
+            started = time.monotonic()
+            _LOGGER.debug(
+                "Startup stage start_notify begin for %s: target=%s index=%s/%s",
+                self._client_label(),
+                target_id,
+                index,
+                total_targets,
+            )
+            try:
+                if self.force_start_notify:
+                    try:
+                        await self._client.start_notify(
+                            target,
+                            self._handle_notify,
+                            bluez={"use_start_notify": True},
+                        )
+                    except TypeError:
+                        _LOGGER.debug(
+                            "Bleak backend does not support bluez use_start_notify; "
+                            "falling back to default start_notify"
+                        )
+                        await self._client.start_notify(target, self._handle_notify)
+                else:
+                    await self._client.start_notify(target, self._handle_notify)
+            except (BleakError, OSError, RuntimeError, TimeoutError) as exc:
+                self._log_startup_stage(
+                    "start_notify",
+                    "failed",
+                    started,
+                    target=target_id,
+                    index=f"{index}/{total_targets}",
+                    allow_pair_fallback=allow_pair_fallback,
+                    error=repr(exc),
+                )
+                if (
+                    allow_pair_fallback
+                    and self.pair_before_startup
+                    and self._is_authorization_error(exc)
+                ):
+                    _LOGGER.debug(
+                        "Startup notify failure looks authorization-related for %s; "
+                        "attempting deferred pair fallback",
+                        self._client_label(),
+                    )
+                    for started_target in started_targets:
+                        with contextlib.suppress(Exception):
+                            await self._client.stop_notify(started_target)
+                    await self._async_pair_for_startup(
+                        reason=f"deferred notify failure target={target_id}"
+                    )
+                    await self._async_refresh_startup_services(
+                        reason="deferred startup pair"
+                    )
+                    self._resolve_gatt_targets()
+                    self._log_target_resolution(reason="deferred startup pair")
+                    await self._async_start_notifications(allow_pair_fallback=False)
+                    return
+                raise
+            else:
+                started_targets.append(target)
+                self._log_startup_stage(
+                    "start_notify",
+                    "complete",
+                    started,
+                    target=target_id,
+                    index=f"{index}/{total_targets}",
+                )
 
     async def async_start(self) -> None:
         """Connect and start notifications."""
@@ -408,58 +669,60 @@ class KawiBle5Client:
         rebond_succeeded = False
         if self.force_rebond_before_startup:
             rebond_succeeded = await self.async_force_rebond()
-
-        # Mirror the official Rideology session bootstrap: discover services first,
-        # then negotiate MTU, then pair inside the live GATT session if needed.
-        await self._async_refresh_services_cache(reason="startup connection pre-pair")
-
-        if self.mtu and hasattr(self._client, "request_mtu"):
-            # Not all platforms support MTU negotiation
-            with contextlib.suppress(Exception):
-                _LOGGER.debug("Requesting MTU %s", self.mtu)
-                await self._client.request_mtu(self.mtu)
-
-        should_pair = self.pair_before_startup or rebond_succeeded
-        if should_pair:
-            if not self.connected:
-                _LOGGER.debug("Reconnecting before pair for %s", self.address)
-                await self._client.connect()
-            await self.async_pair()
-            if not self.connected:
-                _LOGGER.debug("Reconnecting after pair for %s", self.address)
-                await self._client.connect()
-
-        await self._async_refresh_services_cache(
-            reason="pair completion" if should_pair else "startup connection"
+        _LOGGER.debug(
+            "Startup bootstrap begin for %s: pair_before_startup=%s force_rebond_before_startup=%s",
+            self._client_label(),
+            self.pair_before_startup,
+            self.force_rebond_before_startup,
         )
-        self._resolve_gatt_targets()
-        for target in self._notify_targets:
-            target_id = (
-                target.uuid if isinstance(target, BleakGATTCharacteristic) else target
-            )
-            _LOGGER.debug("Starting notify on %s", target_id)
-            if self.force_start_notify:
-                try:
-                    await self._client.start_notify(
-                        target,
-                        self._handle_notify,
-                        bluez={"use_start_notify": True},
-                    )
-                except TypeError:
-                    _LOGGER.debug(
-                        "Bleak backend does not support bluez use_start_notify; "
-                        "falling back to default start_notify"
-                    )
-                    await self._client.start_notify(target, self._handle_notify)
-            else:
-                await self._client.start_notify(target, self._handle_notify)
-        self._pending_frames.clear()
-        _LOGGER.debug("Notifications enabled for %s", self.address or self.ble_device)
 
-    async def _async_refresh_services_cache(self, reason: str) -> None:
+        try:
+            # Keep the first refresh to populate the live session GATT table,
+            # but avoid extra pre-notify work on the normal bonded path.
+            await self._async_refresh_startup_services(
+                reason="startup connection pre-notify"
+            )
+            await self._async_request_startup_mtu()
+
+            if rebond_succeeded:
+                await self._async_pair_for_startup(reason="force rebond completion")
+                await self._async_refresh_startup_services(reason="pair completion")
+            elif self.pair_before_startup:
+                _LOGGER.debug(
+                    "Startup pairing deferred for %s until notify or write authorization requires it",
+                    self._client_label(),
+                )
+
+            self._resolve_gatt_targets()
+            self._log_target_resolution(reason="startup bootstrap")
+            await self._async_start_notifications(
+                allow_pair_fallback=not rebond_succeeded
+            )
+            self._pending_frames.clear()
+            _LOGGER.debug(
+                "Notifications enabled for %s (cache=%s)",
+                self._client_label(),
+                self._services_cache_summary(),
+            )
+        except Exception:
+            _LOGGER.exception(
+                "Startup bootstrap failed before notifications for %s",
+                self._client_label(),
+            )
+            raise
+
+    async def _async_refresh_services_cache(
+        self,
+        reason: str,
+        *,
+        allow_property_fallback: bool = True,
+    ) -> None:
         """Refresh the Bleak-side GATT service cache before resolving targets."""
         if not self._client:
             return
+
+        if not allow_property_fallback:
+            self._services_cache = None
 
         if "pair completion" in reason and hasattr(self._client, "clear_cache"):
             try:
@@ -521,8 +784,16 @@ class KawiBle5Client:
                         exc,
                     )
 
-            if services is None:
+            if services is None and allow_property_fallback:
                 services = self._services_cache or getattr(self._client, "services", None)
+            elif services is None:
+                cached_property_services = getattr(self._client, "services", None)
+                if cached_property_services:
+                    _LOGGER.debug(
+                        "Ignoring client.services property after %s on attempt %s to avoid stale reconnect handles",
+                        reason,
+                        attempt,
+                    )
 
             if not services:
                 self._services_cache = None
@@ -635,10 +906,7 @@ class KawiBle5Client:
 
     def _resolve_gatt_targets(self) -> None:
         """Resolve control/notify characteristics in the target service."""
-        if not self._client:
-            return
-
-        services = self._services_cache or getattr(self._client, "services", None)
+        services = self._services_cache
         if not services:
             _LOGGER.debug(
                 "No GATT service cache available; falling back to UUID-only targets"
@@ -785,19 +1053,22 @@ class KawiBle5Client:
             return True
         return False
 
-    async def async_pair(self) -> None:
+    async def async_pair(self) -> bool:
         """Attempt to pair/bond if the backend supports it."""
         if not self._client or not hasattr(self._client, "pair"):
-            return
+            _LOGGER.debug("Pair skipped for %s because backend has no pair()", self.address)
+            return False
         try:
             paired = await self._client.pair()  # type: ignore[func-returns-value]
             _LOGGER.debug("Pair result for %s: %s", self.address, paired)
+            return True
         except (
             BleakError,
             OSError,
             TimeoutError,
         ) as exc:  # pragma: no cover - backend specific
             _LOGGER.debug("Pair attempt failed: %s", exc)
+            return False
 
     async def async_request_mc_info(self) -> None:
         """Request MC info (0x41)."""
