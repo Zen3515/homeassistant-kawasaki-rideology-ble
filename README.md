@@ -47,18 +47,40 @@ The currently supported bike models are defined in `custom_components/kawasaki/c
 
 ## Bluetooth Proxy Integration
 
-This integration was designed to work through Home Assistant `bluetooth_proxy`, but BLE devices that require passkey pairing are not fully supported by upstream ESPHome at the moment.
+This integration was designed to work through Home Assistant `bluetooth_proxy`.
 
-For now, use the temporary patched `bluetooth_proxy` component from:
-`https://github.com/Zen3515/esphome/tree/z500_bluetooth_proxy_w_passcode`
+### Recommended: Home Assistant Mobile BLE Proxy App
+
+For motorcycles that require PIN/passkey pairing, the recommended setup is now the Android app:
+`https://github.com/Zen3515/homeassistant-mobile-ble-proxy`
+
+This has been more stable in practice than the temporary custom ESPHome patch because Android handles the pairing dialog and keeps the bond for reconnects.
+
+Recommended flow:
+
+1. Install the `Home Assistant Mobile BLE Proxy` app on an Android phone that stays near the bike.
+2. Pair the bike in Android and complete the system passkey dialog there.
+3. Start the proxy in the app.
+4. Add the app to Home Assistant through the ESPHome integration.
+5. Then add/configure `Kawasaki Rideology BLE` normally in Home Assistant.
+
+If you need screen-off scanning, configure the app's `Managed Target Devices` and lock-screen scanning options as described in that repository.
 
 ### Notes / Requirements
-- This patch is compatible with **ESPHome v2026.1.3** only.
+- The Android app above is the recommended way.
+- The ESPHome patch below is kept as an older workaround if you still want dedicated ESP32 hardware.
 
 - Using **Wi-Fi + BLE on the same device** may lead to BLE supervision timeouts and unstable connections (due to radio coexistence under load). For reliable operation, prefer:
   - **Ethernet-based ESP32** deployments, or
   - **ESP32-C5** on a **5 GHz-only** SSID, or
   - **`esp32_hosted`** as an alternative (experimental).
+
+### Older Workaround: Patched ESPHome `bluetooth_proxy`
+
+BLE devices that require passkey pairing are not fully supported by upstream ESPHome at the moment, so this repository previously relied on a temporary patched `bluetooth_proxy` component from:
+`https://github.com/Zen3515/esphome/tree/z500_bluetooth_proxy_w_passcode`
+
+- This patch is compatible with **ESPHome v2026.1.3** only.
 
 This includes the following changes:
 
